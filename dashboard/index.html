@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TeslaUSB Health Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 1px solid #30363d;
+            margin-bottom: 30px;
+        }
+        
+        header h1 {
+            color: #58a6ff;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+        
+        .status-ok {
+            background: #238636;
+            color: white;
+        }
+        
+        .status-warn {
+            background: #9e6a03;
+            color: white;
+        }
+        
+        .status-error {
+            background: #da3633;
+            color: white;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 12px;
+            padding: 20px;
+            transition: border-color 0.2s;
+        }
+        
+        .card:hover {
+            border-color: #58a6ff;
+        }
+        
+        .card h2 {
+            color: #58a6ff;
+            font-size: 1.1rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .card h2 .icon {
+            font-size: 1.3rem;
+        }
+        
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #21262d;
+        }
+        
+        .metric:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-label {
+            color: #8b949e;
+        }
+        
+        .metric-value {
+            font-weight: 600;
+            color: #c9d1d9;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: #238636;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        
+        .progress-fill.warn {
+            background: #9e6a03;
+        }
+        
+        .progress-fill.danger {
+            background: #da3633;
+        }
+        
+        .error-log {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 0.85rem;
+        }
+        
+        .error-log .entry {
+            padding: 5px 0;
+            border-bottom: 1px solid #21262d;
+            color: #f85149;
+        }
+        
+        .error-log .entry:last-child {
+            border-bottom: none;
+        }
+        
+        .error-log .entry.ok {
+            color: #3fb950;
+        }
+        
+        .refresh-btn {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #238636;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            font-size: 1.5rem;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: transform 0.2s, background 0.2s;
+        }
+        
+        .refresh-btn:hover {
+            transform: scale(1.1);
+            background: #2ea043;
+        }
+        
+        .refresh-btn.spinning {
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        .timestamp {
+            text-align: center;
+            color: #8b949e;
+            font-size: 0.85rem;
+            margin-top: 20px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #8b949e;
+        }
+        
+        @media (max-width: 600px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            header h1 {
+                font-size: 1.5rem;
+            }
+            
+            .refresh-btn {
+                width: 50px;
+                height: 50px;
+                font-size: 1.2rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚗 TeslaUSB Health Dashboard</h1>
+            <span id="system-status" class="status-badge status-ok">Loading...</span>
+        </header>
+        
+        <div id="loading" class="loading">
+            <p>Loading system status...</p>
+        </div>
+        
+        <div id="dashboard" class="grid" style="display: none;">
+            <!-- SD Card Usage -->
+            <div class="card">
+                <h2><span class="icon">💾</span> SD-Karte</h2>
+                <div class="metric">
+                    <span class="metric-label">Größe</span>
+                    <span id="root-size" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Genutzt</span>
+                    <span id="root-used" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Verfügbar</span>
+                    <span id="root-avail" class="metric-value">-</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="root-bar" class="progress-fill" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <!-- CAM Partition -->
+            <div class="card">
+                <h2><span class="icon">📹</span> CAM Partition</h2>
+                <div class="metric">
+                    <span class="metric-label">Größe</span>
+                    <span id="cam-size" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Genutzt</span>
+                    <span id="cam-used" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Verfügbar</span>
+                    <span id="cam-avail" class="metric-value">-</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="cam-bar" class="progress-fill" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <!-- Archive Storage -->
+            <div class="card">
+                <h2><span class="icon">☁️</span> Archiv-Speicher</h2>
+                <div class="metric">
+                    <span class="metric-label">Größe</span>
+                    <span id="archive-size" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Genutzt</span>
+                    <span id="archive-used" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Verfügbar</span>
+                    <span id="archive-avail" class="metric-value">-</span>
+                </div>
+                <div class="progress-bar">
+                    <div id="archive-bar" class="progress-fill" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <!-- WiFi Status -->
+            <div class="card">
+                <h2><span class="icon">📡</span> WiFi Status</h2>
+                <div class="metric">
+                    <span class="metric-label">SSID</span>
+                    <span id="wifi-ssid" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Signal</span>
+                    <span id="wifi-signal" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">IP-Adresse</span>
+                    <span id="wifi-ip" class="metric-value">-</span>
+                </div>
+            </div>
+            
+            <!-- File Statistics -->
+            <div class="card">
+                <h2><span class="icon">📁</span> Aufnahmen</h2>
+                <div class="metric">
+                    <span class="metric-label">Recent Clips</span>
+                    <span id="recent-count" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Saved Clips</span>
+                    <span id="saved-count" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Sentry Clips</span>
+                    <span id="sentry-count" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Letzte Aufnahme</span>
+                    <span id="last-recording" class="metric-value">-</span>
+                </div>
+            </div>
+            
+            <!-- Archive Status -->
+            <div class="card">
+                <h2><span class="icon">📤</span> Archiv-Status</h2>
+                <div class="metric">
+                    <span class="metric-label">Letztes Archiv</span>
+                    <span id="last-archive" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Dateien archiviert</span>
+                    <span id="total-archived" class="metric-value">-</span>
+                </div>
+            </div>
+            
+            <!-- System Info -->
+            <div class="card">
+                <h2><span class="icon">🖥️</span> System</h2>
+                <div class="metric">
+                    <span class="metric-label">Hostname</span>
+                    <span id="hostname" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Uptime</span>
+                    <span id="uptime" class="metric-value">-</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Temperatur</span>
+                    <span id="temperature" class="metric-value">-</span>
+                </div>
+            </div>
+            
+            <!-- Error Log -->
+            <div class="card" style="grid-column: 1 / -1;">
+                <h2><span class="icon">⚠️</span> Fehler-Log</h2>
+                <div id="error-log" class="error-log">
+                    <div class="entry">No errors found</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="timestamp">
+            Letzte Aktualisierung: <span id="timestamp">-</span>
+        </div>
+    </div>
+    
+    <button class="refresh-btn" onclick="refreshData()" title="Aktualisieren">🔄</button>
+    
+    <script>
+        let autoRefresh;
+        
+        function parsePercent(pct) {
+            if (!pct || pct === '-') return 0;
+            return parseInt(pct.replace('%', '')) || 0;
+        }
+        
+        function getBarClass(percent) {
+            if (percent >= 90) return 'danger';
+            if (percent >= 70) return 'warn';
+            return '';
+        }
+        
+        async function refreshData() {
+            const btn = document.querySelector('.refresh-btn');
+            btn.classList.add('spinning');
+            
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                // Update disk usage
+                document.getElementById('root-size').textContent = data.disk.root.size;
+                document.getElementById('root-used').textContent = data.disk.root.used;
+                document.getElementById('root-avail').textContent = data.disk.root.avail;
+                const rootPct = parsePercent(data.disk.root.pct);
+                document.getElementById('root-bar').style.width = rootPct + '%';
+                document.getElementById('root-bar').className = 'progress-fill ' + getBarClass(rootPct);
+                
+                document.getElementById('cam-size').textContent = data.disk.cam.size;
+                document.getElementById('cam-used').textContent = data.disk.cam.used;
+                document.getElementById('cam-avail').textContent = data.disk.cam.avail;
+                const camPct = parsePercent(data.disk.cam.pct);
+                document.getElementById('cam-bar').style.width = camPct + '%';
+                document.getElementById('cam-bar').className = 'progress-fill ' + getBarClass(camPct);
+                
+                document.getElementById('archive-size').textContent = data.disk.archive.size;
+                document.getElementById('archive-used').textContent = data.disk.archive.used;
+                document.getElementById('archive-avail').textContent = data.disk.archive.avail;
+                const archivePct = parsePercent(data.disk.archive.pct);
+                document.getElementById('archive-bar').style.width = archivePct + '%';
+                document.getElementById('archive-bar').className = 'progress-fill ' + getBarClass(archivePct);
+                
+                // Update WiFi
+                document.getElementById('wifi-ssid').textContent = data.wifi.ssid;
+                document.getElementById('wifi-signal').textContent = data.wifi.signal;
+                document.getElementById('wifi-ip').textContent = data.wifi.ip;
+                
+                // Update files
+                document.getElementById('recent-count').textContent = data.files.recent_clips;
+                document.getElementById('saved-count').textContent = data.files.saved_clips;
+                document.getElementById('sentry-count').textContent = data.files.sentry_clips;
+                document.getElementById('last-recording').textContent = data.files.last_recording;
+                
+                // Update archive status
+                document.getElementById('last-archive').textContent = data.archive.last_archive;
+                document.getElementById('total-archived').textContent = data.archive.total_archived;
+                
+                // Update system info
+                document.getElementById('hostname').textContent = data.system.hostname;
+                document.getElementById('uptime').textContent = data.system.uptime;
+                document.getElementById('temperature').textContent = data.system.temperature;
+                
+                // Update errors
+                const errorLog = document.getElementById('error-log');
+                errorLog.innerHTML = data.errors.map(e => 
+                    `<div class="entry ${e.includes('No recent errors') ? 'ok' : ''}">${escapeHtml(e)}</div>`
+                ).join('');
+                
+                // Update timestamp
+                const date = new Date(data.timestamp);
+                document.getElementById('timestamp').textContent = date.toLocaleString('de-DE');
+                
+                // Update system status badge
+                const statusBadge = document.getElementById('system-status');
+                let hasErrors = data.errors.length > 0 && !data.errors[0].includes('No recent errors');
+                let highDiskUsage = rootPct > 90 || camPct > 90;
+                
+                if (hasErrors || highDiskUsage) {
+                    statusBadge.className = 'status-badge status-error';
+                    statusBadge.textContent = 'Achtung';
+                } else if (rootPct > 70 || camPct > 70) {
+                    statusBadge.className = 'status-badge status-warn';
+                    statusBadge.textContent = 'OK';
+                } else {
+                    statusBadge.className = 'status-badge status-ok';
+                    statusBadge.textContent = 'Alles OK';
+                }
+                
+                // Show dashboard
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('dashboard').style.display = 'grid';
+                
+            } catch (error) {
+                console.error('Error fetching data:', error);
+                document.getElementById('system-status').textContent = 'Verbindungsfehler';
+                document.getElementById('system-status').className = 'status-badge status-error';
+            } finally {
+                btn.classList.remove('spinning');
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Initial load
+        refreshData();
+        
+        // Auto-refresh every 30 seconds
+        autoRefresh = setInterval(refreshData, 30000);
+    </script>
+</body>
+</html>

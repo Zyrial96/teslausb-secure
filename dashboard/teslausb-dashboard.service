@@ -1,0 +1,14 @@
+[Unit]
+Description=TeslaUSB Health Monitoring Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/teslausb-dashboard
+ExecStart=/usr/bin/python3 /opt/teslausb-dashboard/teslausb-dashboard.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

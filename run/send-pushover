@@ -1,0 +1,43 @@
+#!/bin/bash -eu
+
+NUM_FILES_MOVED="$1"
+
+function log () {
+  echo "$( date )" >> "$LOG_FILE"
+  echo "$1" >> "$LOG_FILE"
+}
+
+CRED_FILE="/root/.teslaCamPushoverCredentials"
+
+if [ -r "$CRED_FILE" ] && [ "$NUM_FILES_MOVED" -gt 0 ]
+then
+  log "Sending Pushover message for moved files."
+
+  # FIX: Safe credential parsing instead of 'source' (prevents code execution)
+  # Parse credentials from file without executing content
+  pushover_user_key=$(grep "^export pushover_user_key=" "$CRED_FILE" 2>/dev/null | sed "s/^export pushover_user_key=//; s/^[\\'\"]//; s/[\\'\"]$//; s/^[[:space:]]*//; s/[[:space:]]*$//")
+  pushover_app_key=$(grep "^export pushover_app_key=" "$CRED_FILE" 2>/dev/null | sed "s/^export pushover_app_key=//; s/^[\\'\"]//; s/[\\'\"]$//; s/^[[:space:]]*//; s/[[:space:]]*$//")
+  
+  # Validate credentials were loaded
+  if [[ -z "$pushover_user_key" ]] || [[ -z "$pushover_app_key" ]]
+  then
+    log "ERROR: Failed to parse Pushover credentials from $CRED_FILE"
+    exit 1
+  fi
+  
+  # Additional validation: check for common injection patterns
+  if [[ "$pushover_user_key" =~ [\$\;\|\&\<\>\`\(\)\{\}] ]] || [[ "$pushover_app_key" =~ [\$\;\|\&\<\>\`\(\)\{\}] ]]
+  then
+    log "ERROR: Pushover credentials contain invalid characters"
+    exit 1
+  fi
+
+  curl -fsSL \
+    -F "token=$pushover_app_key" \
+    -F "user=$pushover_user_key" \
+    -F "title=Dashcam Copy Complete" \
+    -F "message=$NUM_FILES_MOVED file(s) were copied." \
+    https://api.pushover.net/1/messages 2>&1 | log
+    
+  log "Pushover notification sent successfully."
+fi

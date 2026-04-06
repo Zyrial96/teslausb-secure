@@ -1,0 +1,239 @@
+#!/bin/bash -eu
+
+# send-discord - Discord webhook notifications for TeslaUSB
+# Security-hardened with safe credential parsing, rate limiting, and embed formatting
+
+NUM_FILES_MOVED="${1:-0}"
+NUM_FILES_FAILED="${2:-0}"
+
+# Configuration
+CRED_FILE="/root/.teslaCamDiscordCredentials"
+LOG_FILE="${LOG_FILE:-/mutable/archiveloop.log}"
+RATE_LIMIT_FILE="/tmp/discord_rate_limit"
+RATE_LIMIT_RESET_FILE="/tmp/discord_rate_limit_reset"
+
+# Discord rate limits: 5 requests per 2 seconds per webhook
+# We use conservative limits: max 1 request per 2 seconds
+MIN_INTERVAL=2
+
+function log () {
+  echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOG_FILE"
+}
+
+# FIX: Rate limiting to prevent Discord API throttling
+function check_rate_limit () {
+  local now
+  now=$(date +%s)
+  
+  # Check if we're in a rate limit cooldown from Discord headers
+  if [ -f "$RATE_LIMIT_RESET_FILE" ]; then
+    local reset_time
+    reset_time=$(cat "$RATE_LIMIT_RESET_FILE" 2>/dev/null || echo 0)
+    if [ "$now" -lt "$reset_time" ]; then
+      local wait_seconds=$((reset_time - now))
+      log "Discord rate limit active, waiting ${wait_seconds}s..."
+      sleep "$wait_seconds"
+    fi
+    rm -f "$RATE_LIMIT_RESET_FILE"
+  fi
+  
+  # Local rate limiting (conservative)
+  if [ -f "$RATE_LIMIT_FILE" ]; then
+    local last_sent
+    last_sent=$(cat "$RATE_LIMIT_FILE" 2>/dev/null || echo 0)
+    local elapsed=$((now - last_sent))
+    if [ "$elapsed" -lt "$MIN_INTERVAL" ]; then
+      local wait_seconds=$((MIN_INTERVAL - elapsed))
+      log "Discord local rate limit, waiting ${wait_seconds}s..."
+      sleep "$wait_seconds"
+    fi
+  fi
+}
+
+function update_rate_limit () {
+  date +%s > "$RATE_LIMIT_FILE"
+}
+
+# FIX: Safe credential parsing without 'source' (prevents code execution)
+function parse_credentials () {
+  if [ ! -r "$CRED_FILE" ]; then
+    return 1
+  fi
+  
+  # Parse webhook URL from credential file
+  # Format: export discord_webhook_url="https://discord.com/api/webhooks/..."
+  discord_webhook_url=$(grep "^export discord_webhook_url=" "$CRED_FILE" 2>/dev/null | sed 's/^export discord_webhook_url=//; s/^[\\'"'"'""]//; s/[\\'"'"'""]$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  
+  # Optional: custom username override
+  discord_username=$(grep "^export discord_username=" "$CRED_FILE" 2>/dev/null | sed 's/^export discord_username=//; s/^[\\'"'"'""]//; s/[\\'"'"'""]$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  discord_username="${discord_username:-TeslaUSB}"
+  
+  # Optional: avatar URL
+  discord_avatar=$(grep "^export discord_avatar_url=" "$CRED_FILE" 2>/dev/null | sed 's/^export discord_avatar_url=//; s/^[\\'"'"'""]//; s/[\\'"'"'""]$//; s/^[[:space:]]*//; s/[[:space:]]*$//')
+  
+  # Validate webhook URL format
+  if [[ -z "$discord_webhook_url" ]]; then
+    log "ERROR: Discord webhook URL not found in $CRED_FILE"
+    return 1
+  fi
+  
+  # Validate URL starts with https://discord.com/api/webhooks/
+  if [[ ! "$discord_webhook_url" =~ ^https://discord\.com/api/webhooks/[0-9]+/[A-Za-z0-9_-]+$ ]]; then
+    log "ERROR: Invalid Discord webhook URL format"
+    return 1
+  fi
+  
+  # Security: Check for injection patterns in URL
+  if [[ "$discord_webhook_url" =~ [\$\;\|\&\<\>\`\(\)\{\}] ]]; then
+    log "ERROR: Discord webhook URL contains invalid characters"
+    return 1
+  fi
+  
+  return 0
+}
+
+# Build Discord embed JSON
+function build_embed () {
+  local files_moved="$1"
+  local files_failed="${2:-0}"
+  local timestamp
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+  
+  # Determine color based on status
+  # Green (success): 3066993
+  # Yellow (warning): 16776960  
+  # Red (error): 15158332
+  local color=3066993
+  if [ "$files_failed" -gt 0 ]; then
+    color=16776960  # Yellow if some failed
+  fi
+  if [ "$files_moved" -eq 0 ] && [ "$files_failed" -gt 0 ]; then
+    color=15158332  # Red if all failed
+  fi
+  
+  # Build description
+  local description="📹 **$files_moved** Dashcam-Datei(en) archiviert"
+  if [ "$files_failed" -gt 0 ]; then
+    description="$description\n⚠️ **$files_failed** Datei(en) fehlgeschlagen"
+  fi
+  
+  # Optional: Get storage stats
+  local storage_info=""
+  if [ -d "/mnt/archive" ]; then
+    local usage
+    usage=$(df -h /mnt/archive 2>/dev/null | awk 'NR==2 {print $3" / "$2" ("$5")"}' || echo "unknown")
+    if [ -n "$usage" ] && [ "$usage" != "unknown" ]; then
+      storage_info="Archive-Storage: $usage"
+    fi
+  fi
+  
+  # Build fields array
+  local fields=""
+  if [ -n "$storage_info" ]; then
+    fields="{\"name\": \"💾 Speicher\", \"value\": \"$storage_info\", \"inline\": true}"
+  fi
+  
+  # Get hostname for footer
+  local hostname
+  hostname=$(hostname 2>/dev/null || echo "TeslaUSB")
+  
+  # Construct JSON payload with embed
+  local embed_json
+  embed_json=$(cat <<EOF
+{
+  "username": "$(echo "$discord_username" | sed 's/"/\\"/g')",
+  "avatar_url": "${discord_avatar:-https://raw.githubusercontent.com/marcone/teslausb/main/teslausb-logo.png}",
+  "embeds": [{
+    "title": "🚗 TeslaUSB - Archivierung abgeschlossen",
+    "description": "$description",
+    "color": $color,
+    "timestamp": "$timestamp",
+    "footer": {
+      "text": "TeslaUSB • $hostname"
+    },
+    "fields": [${fields:+${fields}}]
+  }]
+}
+EOF
+)
+  
+  echo "$embed_json"
+}
+
+# Send notification to Discord
+function send_notification () {
+  local embed_json="$1"
+  local response
+  local http_code
+  local curl_exit
+  
+  # Create temp file for response headers
+  local headers_file
+  headers_file=$(mktemp /tmp/discord_headers.XXXXXX)
+  
+  # Send request
+  response=$(curl -fsSL \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json" \
+    -X POST \
+    -d "$embed_json" \
+    -D "$headers_file" \
+    -w "\n%{http_code}" \
+    "$discord_webhook_url" 2>&1) || curl_exit=$?
+  
+  http_code=$(echo "$response" | tail -n1)
+  
+  # Check for rate limit headers from Discord
+  local retry_after
+  retry_after=$(grep -i "retry-after:" "$headers_file" 2>/dev/null | awk '{print $2}' | tr -d '\r')
+  if [ -n "$retry_after" ] && [ "$retry_after" -gt 0 ] 2>/dev/null; then
+    local reset_time
+    reset_time=$(($(date +%s) + retry_after))
+    echo "$reset_time" > "$RATE_LIMIT_RESET_FILE"
+    log "Discord rate limit detected, retry after ${retry_after}s"
+  fi
+  
+  rm -f "$headers_file"
+  
+  # Check response
+  if [ "${curl_exit:-0}" -eq 0 ] && [ "$http_code" = "200" ] || [ "$http_code" = "204" ]; then
+    log "Discord notification sent successfully"
+    return 0
+  else
+    log "ERROR: Discord notification failed (HTTP $http_code, exit ${curl_exit:-0}): $response"
+    return 1
+  fi
+}
+
+# Main execution
+main () {
+  # Skip if no files to report
+  if [ "$NUM_FILES_MOVED" -eq 0 ] && [ "$NUM_FILES_FAILED" -eq 0 ]; then
+    exit 0
+  fi
+  
+  # Check credentials
+  if ! parse_credentials; then
+    log "Discord credentials not configured or invalid, skipping notification"
+    exit 0
+  fi
+  
+  log "Sending Discord notification: $NUM_FILES_MOVED file(s) moved, $NUM_FILES_FAILED failed"
+  
+  # Apply rate limiting
+  check_rate_limit
+  
+  # Build and send embed
+  local embed_json
+  embed_json=$(build_embed "$NUM_FILES_MOVED" "$NUM_FILES_FAILED")
+  
+  if send_notification "$embed_json"; then
+    update_rate_limit
+    exit 0
+  else
+    exit 1
+  fi
+}
+
+# Run main function
+main "$@"
