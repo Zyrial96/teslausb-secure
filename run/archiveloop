@@ -1,0 +1,308 @@
+#!/bin/bash -eu
+ARCHIVE_HOST_NAME="$1"
+
+# FIX: Ensure log directory exists
+LOG_DIR="/mutable"
+mkdir -p "$LOG_DIR"
+
+export LOG_FILE=/mutable/archiveloop.log
+export CAM_MOUNT=/mnt/cam
+export MUSIC_MOUNT=/mnt/music
+export ARCHIVE_MOUNT=/mnt/archive
+
+# FIX: Cleanup state tracking to prevent double-cleanup
+CLEANUP_DONE=false
+
+# FIX: Signal handler for graceful shutdown
+function cleanup () {
+  if [ "$CLEANUP_DONE" = true ]; then
+    return
+  fi
+  CLEANUP_DONE=true
+  
+  log "Received shutdown signal, cleaning up..."
+  
+  # Unmount CAM if mounted
+  if findmnt --mountpoint "$CAM_MOUNT" > /dev/null 2>&1; then
+    log "Unmounting CAM mount..."
+    umount "$CAM_MOUNT" >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to unmount CAM"
+  fi
+  
+  # Unmount ARCHIVE if mounted
+  if findmnt --mountpoint "$ARCHIVE_MOUNT" > /dev/null 2>&1; then
+    log "Unmounting ARCHIVE mount..."
+    umount "$ARCHIVE_MOUNT" >> "$LOG_FILE" 2>&1 || log "WARNING: Failed to unmount ARCHIVE"
+  fi
+  
+  # Re-enable USB storage
+  if lsmod | grep -q "^g_mass_storage"; then
+    log "Re-enabling USB mass storage..."
+    modprobe -r g_mass_storage 2>/dev/null || true
+    modprobe g_mass_storage 2>/dev/null || log "WARNING: Failed to restore USB storage"
+  fi
+  
+  log "Cleanup complete"
+  exit 0
+}
+
+# Register signal handlers
+trap cleanup EXIT INT TERM
+
+# FIX: Sanitized log function to prevent log injection
+function log () {
+  local message="$1"
+  # Remove control characters, newlines, and terminal escape sequences
+  # Only allow printable ASCII (32-126) and tab
+  message=$(printf '%s' "$message" | tr -d '\r\n\000-\031\177' | sed 's/\\e\[[0-9;]*m//g')
+  
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$LOG_FILE"
+}
+
+function fix_errors_in_mount_point () {
+  local mount_point="$1"
+  log "Running fsck on $mount_point..."
+  /sbin/fsck "$mount_point" -- -a >> "$LOG_FILE" 2>&1 || true
+  log "Finished fsck on $mount_point."
+}
+
+function fix_errors_in_mounted_files () {
+  fix_errors_in_mount_point "$CAM_MOUNT"
+  fix_errors_in_mount_point "$MUSIC_MOUNT"
+}
+
+function archive_is_reachable () {
+  local reachable=true
+
+  /root/bin/archive-is-reachable.sh "$ARCHIVE_HOST_NAME" || reachable=false
+
+  if [ "$reachable" = false ]; then
+    return 1
+  fi
+  return 0
+}
+
+function connect_usb_drives_to_host() {
+  log "Connecting usb to host..."
+  if ! modprobe g_mass_storage 2>>"$LOG_FILE"; then
+    log "ERROR: Failed to load g_mass_storage kernel module"
+    return 1
+  fi
+  log "Connected usb to host."
+}
+
+function wait_for_archive_to_be_reachable () {
+  log "Waiting for archive to be reachable..."
+  while true; do
+    if archive_is_reachable; then
+      log "Archive is reachable."
+      break
+    fi
+    if [ -e /tmp/archive_is_reachable ]; then
+      log "Simulating archive is reachable"
+      rm /tmp/archive_is_reachable
+      break
+    fi
+    sleep 1
+  done
+}
+
+# FIX: Retry with exponential backoff
+function retry () {
+  local cmd="$1"
+  shift
+  local max_attempts="${1:-10}"
+  shift 2>/dev/null || true
+  local attempts=0
+  local delay=1
+  local max_delay=60
+  
+  while true; do
+    if "$cmd" "$@"; then
+      return 0
+    fi
+    
+    if [ "$attempts" -ge "$max_attempts" ]; then
+      log "Attempts exhausted for command: $cmd (tried $max_attempts times)"
+      return 1
+    fi
+    
+    log "Waiting ${delay}s before retry $((attempts + 1))/$max_attempts..."
+    sleep "$delay"
+    
+    # Exponential backoff: 1, 2, 4, 8, 16, 32, 60, 60...
+    delay=$((delay * 2))
+    if [ "$delay" -gt "$max_delay" ]; then
+      delay=$max_delay
+    fi
+    
+    attempts=$((attempts + 1))
+    log "Retrying $cmd..."
+  done
+}
+
+function mount_mountpoint () {
+  local mount_point="$1"
+  log "Mounting $mount_point..."
+
+  if mount "$mount_point" >> "$LOG_FILE" 2>&1; then
+    log "Mounted $mount_point."
+    return 0
+  else
+    log "Failed to mount $mount_point."
+    return 1
+  fi
+}
+
+function ensure_mountpoint_is_mounted () {
+  local mount_point="$1"
+
+  if findmnt --mountpoint "$mount_point" > /dev/null 2>&1; then
+    log "$mount_point is already mounted."
+  else
+    mount_mountpoint "$mount_point"
+  fi
+}
+
+function ensure_mountpoint_is_mounted_with_retry () {
+  retry ensure_mountpoint_is_mounted "$1"
+}
+
+function fix_errors_in_cam_file () {
+  fix_errors_in_mount_point "$CAM_MOUNT"
+}
+
+function ensure_cam_file_is_mounted () {
+  log "Ensuring cam file is mounted..."
+  ensure_mountpoint_is_mounted_with_retry "$CAM_MOUNT"
+  log "Ensured cam file is mounted."
+}
+
+function ensure_music_file_is_mounted () {
+  log "Ensuring music backing file is mounted..."
+  ensure_mountpoint_is_mounted_with_retry "$MUSIC_MOUNT"
+  log "Ensured music drive is mounted."
+}
+
+function unmount_mount_point () {
+  local mount_point="$1"
+  log "Unmounting $mount_point..."
+  umount "$mount_point" >> "$LOG_FILE" 2>&1 || true
+  log "Unmounted $mount_point."
+}
+
+function unmount_cam_file () {
+  unmount_mount_point "$CAM_MOUNT"
+}
+
+function unmount_music_file () {
+  unmount_mount_point "$MUSIC_MOUNT"
+}
+
+function fix_errors_in_music_file () {
+  fix_errors_in_mount_point "$MUSIC_MOUNT"
+}
+
+function wait_for_archive_to_be_unreachable () {
+  log "Waiting for archive to be unreachable..."
+  while true; do
+    if ! retry archive_is_reachable 3; then
+      log "Archive is unreachable."
+      break
+    fi
+    if [ -e /tmp/archive_is_unreachable ]; then
+      log "Simulating archive being unreachable."
+      rm /tmp/archive_is_unreachable
+      break
+    fi
+    sleep 1
+  done
+}
+
+function mount_and_fix_errors_in_cam_file () {
+  ensure_cam_file_is_mounted
+  fix_errors_in_cam_file
+  unmount_cam_file
+}
+
+function mount_and_fix_errors_in_music_file () {
+  if [ -e "$MUSIC_MOUNT" ]; then
+    ensure_music_file_is_mounted
+    fix_errors_in_music_file
+    unmount_music_file
+  fi
+}
+
+function mount_and_fix_errors_in_files () {
+  mount_and_fix_errors_in_cam_file
+  mount_and_fix_errors_in_music_file
+}
+
+function disconnect_usb_drives_from_host () {
+  log "Disconnecting usb from host..."
+  if ! modprobe -r g_mass_storage 2>>"$LOG_FILE"; then
+    log "WARNING: Failed to unload g_mass_storage kernel module"
+  fi
+  log "Disconnected usb from host."
+}
+
+function archive_teslacam_clips () {
+  log "Starting archival process..."
+
+  /root/bin/connect-archive.sh
+
+  disconnect_usb_drives_from_host
+
+  ensure_cam_file_is_mounted
+
+  fix_errors_in_cam_file
+
+  /root/bin/archive-clips.sh
+
+  /root/bin/disconnect-archive.sh
+
+  unmount_cam_file
+
+  connect_usb_drives_to_host
+}
+
+function archive_clips () {
+  log "Archiving..."
+  if archive_teslacam_clips; then
+    log "Finished archiving."
+  else
+    log "Archiving failed."
+  fi
+}
+
+function truncate_log () {
+  local log_length
+  log_length=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+  if [ "$log_length" -gt 10000 ]; then
+    log "Truncating log..."
+    local log_file2="${LOG_FILE}.2"
+    tail -n 10000 "$LOG_FILE" > "$log_file2"
+    mv "$log_file2" "$LOG_FILE"
+  fi
+}
+
+# Export functions for subshells
+export -f mount_mountpoint ensure_mountpoint_is_mounted retry
+export -f ensure_mountpoint_is_mounted_with_retry log
+
+log "Starting archiveloop daemon..."
+
+if archive_is_reachable; then
+  mount_and_fix_errors_in_music_file
+  archive_clips
+  wait_for_archive_to_be_unreachable
+else
+  mount_and_fix_errors_in_files
+  connect_usb_drives_to_host
+fi
+
+while true; do
+  wait_for_archive_to_be_reachable
+  archive_clips
+  truncate_log
+  wait_for_archive_to_be_unreachable
+done
